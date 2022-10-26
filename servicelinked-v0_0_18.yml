@@ -1,0 +1,125 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Support for Fargate gathers information about your AWS resources through API calls to provide customer service and technical support. To increase the transparency and auditability of support activities, AWS Support for Fargate uses an AWS Identity and Access Management (IAM) service-linked role. The AWSServiceRoleForSupport service-linked role is a unique IAM role that is linked directly to AWS Support. This service-linked role is predefined, and it includes the permissions that AWS Support for Fargate requires to call other AWS services on your behalf.'
+Resources:
+  AWSSupportRoleForFargate:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: arn:aws:iam::TODO_REPLACE_WITH_AWS_ID:role/AWSSupportRoleForFargate
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AdministratorAccess'
+      RoleName: AWSSupportRoleForFargate
+  # ### #
+  AWSSupportRoleForLambda:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: AWSLambdaRegister
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: '*'
+      RoleName: AWSSupportRoleForLambda
+  # ### #
+  AWSSupportForFargateLambdaInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref AWSSupportRoleForLambda
+    DependsOn:
+      - AWSSupportRoleForLambda
+  # ### #
+  AWSSupportForFargateRegisterAccountFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: register-accountid-with-aws-fargate-support
+      Environment:
+        Variables:
+          ROLE_ARN: !GetAtt AWSSupportRoleForFargate.Arn
+      Description: Python lambda function to register with AWS Support for Fargate with an AWS Identity and Access Management (IAM) service-linked role
+      Runtime: python3.7
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import urllib3
+          import certifi
+          import traceback
+          import cfnresponse
+
+          def handler(event, context):
+            macro_response = {
+              "status": "success"
+            }
+            try:
+              role_arn = os.getenv('ROLE_ARN')
+
+              http = urllib3.PoolManager(ca_certs=certifi.where())
+
+              payload = {
+                  "AwsSupportArn": role_arn
+              }
+              assessment_id = "TODO_REPLACE_WITH_FIVE_DIGIT_NUMBER"
+              if assessment_id:
+                payload["assessment_id"] = assessment_id
+              encoded_data = json.dumps(payload).encode('utf-8')
+
+              resp = http.request(
+                   'POST',
+                   'https://TODO_REPLACE_WITH_URL.execute-api.us-east-1.amazonaws.com/Prod/RegSupport/',
+                   body=encoded_data,
+                   headers={
+                      'Content-Type': 'application/json'
+                   }
+              )
+
+              data = json.loads(resp.data.decode('utf-8'))
+              macro_response['Data'] = data
+              # Without this the InvokeLambda below doesn't finish properly and the stack is rolled back
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, macro_response)
+
+            except Exception as e:
+              # Print stacktrace if there is an exception, may want to do more with this
+              traceback.print_exc()
+              macro_response["status"] = "failure"
+              macro_response["errorMessage"] = str(e)
+              # Without this the InvokeLambda below doesn't finish properly and the stack is rolled back
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, macro_response)
+
+            # Execution never reaches this return
+            return macro_response
+
+      Handler: index.handler
+      Role: !GetAtt AWSSupportRoleForLambda.Arn
+
+  # This causes the lambda function to run
+  InvokeLambda:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - AWSSupportForFargateRegisterAccountFunction
+      - AWSSupportForFargateLambdaInstanceProfile
+    Version: "1.0"
+    Properties:
+      ServiceToken: !GetAtt AWSSupportForFargateRegisterAccountFunction.Arn
+      FunctionName: AWSSupportForFargateRegisterAccountFunction
